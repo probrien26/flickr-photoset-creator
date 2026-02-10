@@ -2,35 +2,21 @@
 """FastAPI web version of the Flickr Interesting Photos Set Creator."""
 
 import asyncio
-import hashlib
 import json
 import os
 import secrets
-import sqlite3
 import sys
 import time
 from datetime import datetime
 from typing import Optional
 
-import flickrapi
-from flickrapi.auth import FlickrAccessToken
-from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load environment
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-
-# Import core logic
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import flickr_interestingness as core
-
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-
-# --- Token extraction CLI mode ---
+# --- Token extraction CLI mode (exit early before heavy imports) ---
 if __name__ == "__main__" and "--extract-token" in sys.argv:
+    from dotenv import load_dotenv as _ld
+    _ld(os.path.join(BASE_DIR, ".env"))
+    import sqlite3
     api_key = os.environ.get("FLICKR_API_KEY")
     if not api_key:
         print("Error: FLICKR_API_KEY not set in environment or .env file.")
@@ -57,6 +43,23 @@ if __name__ == "__main__" and "--extract-token" in sys.argv:
         print(f"No token found for API key {api_key}.")
         print("Run the desktop app first to authenticate with Flickr.")
     sys.exit(0)
+
+import flickrapi
+from flickrapi.auth import FlickrAccessToken
+from dotenv import load_dotenv
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
+
+# Load environment
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+
+# Import core logic
+sys.path.insert(0, BASE_DIR)
+import flickr_interestingness as core
+
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
 
 # --- FastAPI app ---
 app = FastAPI(title="Flickr Interesting Photos Set Creator")
