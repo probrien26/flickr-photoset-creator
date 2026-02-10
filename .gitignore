@@ -1,0 +1,8 @@
+.env
+__pycache__/
+build/
+dist/
+*.spec
+*.exe
+*.docx
+*.jpg
