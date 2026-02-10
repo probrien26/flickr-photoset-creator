@@ -6,3 +6,8 @@ dist/
 *.exe
 *.docx
 *.jpg
+.gitconfig
+.claude.json
+.claude.json.backup.*
+nul
+install.cmd

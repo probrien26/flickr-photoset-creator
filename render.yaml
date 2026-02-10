@@ -2,6 +2,7 @@ services:
   - type: web
     name: flickr-photoset-creator
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn web_app:app --host 0.0.0.0 --port $PORT
     envVars:
@@ -19,3 +20,5 @@ services:
         sync: false
       - key: APP_PASSWORD
         sync: false
+      - key: PYTHON_VERSION
+        value: 3.12.10
