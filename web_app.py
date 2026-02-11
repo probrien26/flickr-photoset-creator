@@ -4,13 +4,10 @@
 import asyncio
 import json
 import os
-import random
 import secrets
-import smtplib
 import sys
 import time
 from datetime import datetime
-from email.mime.text import MIMEText
 from typing import Optional
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +45,7 @@ if __name__ == "__main__" and "--extract-token" in sys.argv:
     sys.exit(0)
 
 import flickrapi
+import pyotp
 from flickrapi.auth import FlickrAccessToken
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form
@@ -78,32 +76,8 @@ auth_flickr_temp: Optional[flickrapi.FlickrAPI] = None
 # Auth cookie token (generated once per process)
 AUTH_COOKIE_TOKEN = secrets.token_hex(32)
 
-# SMTP config for email-based 2FA
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
-SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD", "")
-
-# Pending 2FA verification (single-user, in-memory)
-pending_2fa = {"code": None, "expires": 0}
-
-
-def send_otp_email(code: str) -> tuple[bool, str]:
-    """Send a 6-digit OTP code via Yahoo SMTP. Returns (success, error_message)."""
-    msg = MIMEText(
-        f"Your Flickr Photoset Creator login code is:\n\n    {code}\n\n"
-        "This code expires in 5 minutes.",
-        "plain",
-    )
-    msg["Subject"] = "Your Flickr App Login Code"
-    msg["From"] = SMTP_USERNAME
-    msg["To"] = APP_USERNAME
-    try:
-        with smtplib.SMTP_SSL("smtp.mail.yahoo.com", 465, timeout=15) as server:
-            server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
-            server.send_message(msg)
-        return True, ""
-    except Exception as e:
-        print(f"Failed to send OTP email: {e}")
-        return False, str(e)
+# TOTP config for authenticator-app 2FA
+TOTP_SECRET = os.environ.get("TOTP_SECRET", "")
 
 
 def get_flickr_client():
@@ -230,18 +204,11 @@ async def login_submit(username: str = Form(...), password: str = Form(...)):
     if username != APP_USERNAME or password != APP_PASSWORD:
         return RedirectResponse("/login?error=Invalid+username+or+password", status_code=302)
 
-    # If SMTP is configured, send 2FA code; otherwise grant access directly
-    if SMTP_USERNAME and SMTP_APP_PASSWORD:
-        code = str(random.randint(100000, 999999))
-        pending_2fa["code"] = code
-        pending_2fa["expires"] = time.time() + 300  # 5 minutes
-        ok, err = send_otp_email(code)
-        if not ok:
-            from urllib.parse import quote
-            return RedirectResponse(f"/login?error={quote(f'Email send failed: {err}')}", status_code=302)
+    # If TOTP is configured, require authenticator code; otherwise grant access directly
+    if TOTP_SECRET:
         return RedirectResponse("/verify", status_code=302)
 
-    # No SMTP configured — skip 2FA
+    # No TOTP configured — skip 2FA
     response = RedirectResponse("/", status_code=302)
     response.set_cookie(
         "app_auth", AUTH_COOKIE_TOKEN, httponly=True, samesite="lax", max_age=86400 * 30
@@ -280,7 +247,7 @@ async def verify_page(error: str = ""):
 </head><body>
 <div class="login-box">
     <h2>Verification Code</h2>
-    <p class="info">A 6-digit code has been sent to your email.</p>
+    <p class="info">Enter the 6-digit code from your authenticator app.</p>
     {error_html}
     <form method="post" action="/verify">
         <label for="code">Enter Code</label>
@@ -295,22 +262,61 @@ async def verify_page(error: str = ""):
 
 @app.post("/verify")
 async def verify_submit(code: str = Form(...)):
-    if pending_2fa["code"] is None:
-        return RedirectResponse("/login?error=No+pending+verification.+Please+log+in+again", status_code=302)
-    if time.time() > pending_2fa["expires"]:
-        pending_2fa["code"] = None
-        return RedirectResponse("/login?error=Code+expired.+Please+log+in+again", status_code=302)
-    if code != pending_2fa["code"]:
+    if not TOTP_SECRET:
+        return RedirectResponse("/login", status_code=302)
+    totp = pyotp.TOTP(TOTP_SECRET)
+    if not totp.verify(code, valid_window=1):
         return RedirectResponse("/verify?error=Invalid+code.+Please+try+again", status_code=302)
 
-    # Code is valid — clear it and grant access
-    pending_2fa["code"] = None
-    pending_2fa["expires"] = 0
+    # Code is valid — grant access
     response = RedirectResponse("/", status_code=302)
     response.set_cookie(
         "app_auth", AUTH_COOKIE_TOKEN, httponly=True, samesite="lax", max_age=86400 * 30
     )
     return response
+
+
+@app.get("/setup-2fa", response_class=HTMLResponse)
+async def setup_2fa_page():
+    if not TOTP_SECRET:
+        return HTMLResponse("<p>TOTP_SECRET not configured.</p>", status_code=500)
+    totp = pyotp.TOTP(TOTP_SECRET)
+    provisioning_uri = totp.provisioning_uri(
+        name=APP_USERNAME or "user",
+        issuer_name="Flickr Photoset Creator",
+    )
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Setup 2FA - Flickr Photoset Creator</title>
+<style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #2b2b2b; color: #e0e0e0; display: flex; justify-content: center;
+           align-items: center; min-height: 100vh; margin: 0; }}
+    .setup-box {{ background: #3c3c3c; border-radius: 8px; padding: 32px; width: 380px;
+                  box-shadow: 0 4px 24px rgba(0,0,0,0.3); text-align: center; }}
+    h2 {{ margin: 0 0 16px; }}
+    p {{ font-size: 14px; color: #aaa; margin-bottom: 16px; line-height: 1.5; }}
+    #qrcode {{ display: flex; justify-content: center; margin-bottom: 16px; }}
+    #qrcode canvas {{ border-radius: 8px; }}
+    .secret {{ background: #2b2b2b; border: 1px solid #555; border-radius: 4px;
+               padding: 10px; font-family: monospace; font-size: 16px; letter-spacing: 2px;
+               word-break: break-all; margin-bottom: 16px; user-select: all; }}
+    .back {{ color: #6a9eda; text-decoration: none; font-size: 14px; }}
+    .back:hover {{ text-decoration: underline; }}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+</head><body>
+<div class="setup-box">
+    <h2>Setup Two-Factor Authentication</h2>
+    <p>Scan this QR code with Google Authenticator, Authy, or Microsoft Authenticator:</p>
+    <div id="qrcode"></div>
+    <p>Or enter this key manually:</p>
+    <div class="secret">{TOTP_SECRET}</div>
+    <a class="back" href="/">Back to app</a>
+</div>
+<script>new QRCode(document.getElementById("qrcode"), {{text: "{provisioning_uri}", width: 200, height: 200}});</script>
+</body></html>"""
 
 
 @app.get("/status")
