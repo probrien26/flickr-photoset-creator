@@ -138,8 +138,8 @@ async def check_auth(request: Request, call_next):
     # Allow auth callback through (Flickr redirect)
     if path.startswith("/auth/callback"):
         return await call_next(request)
-    # Allow login and 2FA verification pages
-    if path in ("/login", "/verify"):
+    # Allow login, 2FA verification, and 2FA setup pages
+    if path in ("/login", "/verify", "/setup-2fa"):
         return await call_next(request)
 
     # Check auth cookie
