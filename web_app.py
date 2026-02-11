@@ -4,10 +4,13 @@
 import asyncio
 import json
 import os
+import random
 import secrets
+import smtplib
 import sys
 import time
 from datetime import datetime
+from email.mime.text import MIMEText
 from typing import Optional
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,6 +78,33 @@ auth_flickr_temp: Optional[flickrapi.FlickrAPI] = None
 # Auth cookie token (generated once per process)
 AUTH_COOKIE_TOKEN = secrets.token_hex(32)
 
+# SMTP config for email-based 2FA
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD", "")
+
+# Pending 2FA verification (single-user, in-memory)
+pending_2fa = {"code": None, "expires": 0}
+
+
+def send_otp_email(code: str) -> bool:
+    """Send a 6-digit OTP code via Yahoo SMTP. Returns True on success."""
+    msg = MIMEText(
+        f"Your Flickr Photoset Creator login code is:\n\n    {code}\n\n"
+        "This code expires in 5 minutes.",
+        "plain",
+    )
+    msg["Subject"] = "Your Flickr App Login Code"
+    msg["From"] = SMTP_USERNAME
+    msg["To"] = APP_USERNAME
+    try:
+        with smtplib.SMTP_SSL("smtp.mail.yahoo.com", 465) as server:
+            server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"Failed to send OTP email: {e}")
+        return False
+
 
 def get_flickr_client():
     """Initialize Flickr client from env vars or cached token."""
@@ -134,8 +164,8 @@ async def check_auth(request: Request, call_next):
     # Allow auth callback through (Flickr redirect)
     if path.startswith("/auth/callback"):
         return await call_next(request)
-    # Allow login page
-    if path == "/login":
+    # Allow login and 2FA verification pages
+    if path in ("/login", "/verify"):
         return await call_next(request)
 
     # Check auth cookie
@@ -197,13 +227,88 @@ async def login_page(error: str = ""):
 
 @app.post("/login")
 async def login_submit(username: str = Form(...), password: str = Form(...)):
-    if username == APP_USERNAME and password == APP_PASSWORD:
-        response = RedirectResponse("/", status_code=302)
-        response.set_cookie(
-            "app_auth", AUTH_COOKIE_TOKEN, httponly=True, samesite="lax", max_age=86400 * 30
-        )
-        return response
-    return RedirectResponse("/login?error=Invalid+username+or+password", status_code=302)
+    if username != APP_USERNAME or password != APP_PASSWORD:
+        return RedirectResponse("/login?error=Invalid+username+or+password", status_code=302)
+
+    # If SMTP is configured, send 2FA code; otherwise grant access directly
+    if SMTP_USERNAME and SMTP_APP_PASSWORD:
+        code = str(random.randint(100000, 999999))
+        pending_2fa["code"] = code
+        pending_2fa["expires"] = time.time() + 300  # 5 minutes
+        if not send_otp_email(code):
+            return RedirectResponse("/login?error=Failed+to+send+verification+code", status_code=302)
+        return RedirectResponse("/verify", status_code=302)
+
+    # No SMTP configured — skip 2FA
+    response = RedirectResponse("/", status_code=302)
+    response.set_cookie(
+        "app_auth", AUTH_COOKIE_TOKEN, httponly=True, samesite="lax", max_age=86400 * 30
+    )
+    return response
+
+
+@app.get("/verify", response_class=HTMLResponse)
+async def verify_page(error: str = ""):
+    error_html = f'<p class="error">{error}</p>' if error else ""
+    return f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Verify - Flickr Photoset Creator</title>
+<style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           background: #2b2b2b; color: #e0e0e0; display: flex; justify-content: center;
+           align-items: center; min-height: 100vh; margin: 0; }}
+    .login-box {{ background: #3c3c3c; border-radius: 8px; padding: 32px; width: 320px;
+                  box-shadow: 0 4px 24px rgba(0,0,0,0.3); }}
+    h2 {{ margin: 0 0 12px; text-align: center; }}
+    p.info {{ font-size: 13px; color: #aaa; text-align: center; margin-bottom: 16px; }}
+    label {{ display: block; margin-bottom: 4px; font-size: 14px; }}
+    input {{ width: 100%; padding: 8px; margin-bottom: 16px; border: 1px solid #555;
+             background: #2b2b2b; color: #e0e0e0; border-radius: 4px; box-sizing: border-box;
+             font-size: 20px; text-align: center; letter-spacing: 6px; }}
+    input:focus {{ outline: none; border-color: #6a9eda; }}
+    button {{ width: 100%; padding: 10px; background: #0063dc; color: white; border: none;
+              border-radius: 4px; cursor: pointer; font-size: 15px; }}
+    button:hover {{ background: #0052b5; }}
+    .error {{ color: #ff6b6b; text-align: center; margin-bottom: 12px; }}
+    .back {{ display: block; text-align: center; margin-top: 12px; color: #6a9eda;
+             text-decoration: none; font-size: 13px; }}
+    .back:hover {{ text-decoration: underline; }}
+</style>
+</head><body>
+<div class="login-box">
+    <h2>Verification Code</h2>
+    <p class="info">A 6-digit code has been sent to your email.</p>
+    {error_html}
+    <form method="post" action="/verify">
+        <label for="code">Enter Code</label>
+        <input type="text" id="code" name="code" required maxlength="6" pattern="[0-9]{{6}}"
+               inputmode="numeric" autocomplete="one-time-code" placeholder="------">
+        <button type="submit">Verify</button>
+    </form>
+    <a class="back" href="/login">Back to login</a>
+</div>
+</body></html>"""
+
+
+@app.post("/verify")
+async def verify_submit(code: str = Form(...)):
+    if pending_2fa["code"] is None:
+        return RedirectResponse("/login?error=No+pending+verification.+Please+log+in+again", status_code=302)
+    if time.time() > pending_2fa["expires"]:
+        pending_2fa["code"] = None
+        return RedirectResponse("/login?error=Code+expired.+Please+log+in+again", status_code=302)
+    if code != pending_2fa["code"]:
+        return RedirectResponse("/verify?error=Invalid+code.+Please+try+again", status_code=302)
+
+    # Code is valid — clear it and grant access
+    pending_2fa["code"] = None
+    pending_2fa["expires"] = 0
+    response = RedirectResponse("/", status_code=302)
+    response.set_cookie(
+        "app_auth", AUTH_COOKIE_TOKEN, httponly=True, samesite="lax", max_age=86400 * 30
+    )
+    return response
 
 
 @app.get("/status")
