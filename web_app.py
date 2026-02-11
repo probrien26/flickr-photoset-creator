@@ -86,8 +86,8 @@ SMTP_APP_PASSWORD = os.environ.get("SMTP_APP_PASSWORD", "")
 pending_2fa = {"code": None, "expires": 0}
 
 
-def send_otp_email(code: str) -> bool:
-    """Send a 6-digit OTP code via Yahoo SMTP. Returns True on success."""
+def send_otp_email(code: str) -> tuple[bool, str]:
+    """Send a 6-digit OTP code via Yahoo SMTP. Returns (success, error_message)."""
     msg = MIMEText(
         f"Your Flickr Photoset Creator login code is:\n\n    {code}\n\n"
         "This code expires in 5 minutes.",
@@ -97,13 +97,13 @@ def send_otp_email(code: str) -> bool:
     msg["From"] = SMTP_USERNAME
     msg["To"] = APP_USERNAME
     try:
-        with smtplib.SMTP_SSL("smtp.mail.yahoo.com", 465) as server:
+        with smtplib.SMTP_SSL("smtp.mail.yahoo.com", 465, timeout=15) as server:
             server.login(SMTP_USERNAME, SMTP_APP_PASSWORD)
             server.send_message(msg)
-        return True
+        return True, ""
     except Exception as e:
         print(f"Failed to send OTP email: {e}")
-        return False
+        return False, str(e)
 
 
 def get_flickr_client():
@@ -235,8 +235,10 @@ async def login_submit(username: str = Form(...), password: str = Form(...)):
         code = str(random.randint(100000, 999999))
         pending_2fa["code"] = code
         pending_2fa["expires"] = time.time() + 300  # 5 minutes
-        if not send_otp_email(code):
-            return RedirectResponse("/login?error=Failed+to+send+verification+code", status_code=302)
+        ok, err = send_otp_email(code)
+        if not ok:
+            from urllib.parse import quote
+            return RedirectResponse(f"/login?error={quote(f'Email send failed: {err}')}", status_code=302)
         return RedirectResponse("/verify", status_code=302)
 
     # No SMTP configured — skip 2FA
